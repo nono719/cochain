@@ -529,159 +529,336 @@
       </div>
     </el-card>
 
-    <!-- ═══════════ 资源访问面板 ═══════════ -->
+    <!-- ═══════════ 权限矩阵: 跨域认证授予了什么权限 ═══════════ -->
+    <el-card v-if="result && result.granted" class="panel" shadow="never">
+      <template #header><span class="hdr">🛡️ 跨域权限矩阵 <small>认证通过后，不同权限等级对应不同的资源访问能力</small></span></template>
+      <div class="perm-matrix">
+        <div v-for="tier in permTiers" :key="tier.scope" class="pm-tier"
+          :class="{ unlocked: hasScopeGranted(tier.scope), locked: !hasScopeGranted(tier.scope) }">
+          <div class="pm-tier-head" :style="{ borderColor: tier.color }">
+            <div class="pm-tier-icon">{{ tier.icon }}</div>
+            <div class="pm-tier-info">
+              <div class="pm-tier-name" :style="{ color: tier.color }">{{ tier.label }} 权限</div>
+              <div class="pm-tier-desc">{{ tier.desc }}</div>
+            </div>
+            <div class="pm-tier-status">
+              <el-tag v-if="hasScopeGranted(tier.scope)" type="success" effect="dark" size="small">已授予</el-tag>
+              <el-tag v-else-if="hasScopeRequested(tier.scope) && !hasScopeGranted(tier.scope)" type="warning" effect="dark" size="small">
+                {{ tier.scope === 'readonly' ? '未授予' : (approval?.status === 'pending' ? '待审批' : (approval?.status === 'rejected' ? '已驳回' : '未授予')) }}
+              </el-tag>
+              <el-tag v-else type="info" size="small">未申请</el-tag>
+            </div>
+          </div>
+          <div class="pm-tier-abilities">
+            <div v-for="ab in tier.abilities" :key="ab.key" class="pm-ability"
+              :class="{ active: hasScopeGranted(tier.scope), disabled: !hasScopeGranted(tier.scope) }">
+              <span class="pm-ab-icon">{{ hasScopeGranted(tier.scope) ? '✅' : '🔒' }}</span>
+              <div class="pm-ab-text">
+                <div class="pm-ab-name">{{ ab.name }}</div>
+                <div class="pm-ab-desc">{{ ab.desc }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="!hasScopeGranted(tier.scope) && !hasScopeRequested(tier.scope)" class="pm-tier-hint">
+            💡 本次认证未申请此权限。如需此能力，请重新发起认证并勾选「{{ tier.label }}」权限。
+          </div>
+          <div v-if="hasScopeRequested(tier.scope) && !hasScopeGranted(tier.scope) && (tier.scope === 'control' || tier.scope === 'storage')" class="pm-tier-hint warn">
+            <span v-if="approval?.status === 'pending'">
+              ⏳ 已申请但需目标域管理员审批。
+              <el-button size="small" type="success" @click="approveCurrentSession" style="margin-left:8px">模拟审批通过</el-button>
+              <el-button size="small" type="danger" @click="rejectCurrentSession" style="margin-left:4px">模拟驳回</el-button>
+            </span>
+            <span v-else-if="approval?.status === 'rejected'">❌ 目标域管理员已驳回此高权限请求。{{ approval.note ? `原因: ${approval.note}` : '' }}</span>
+          </div>
+        </div>
+      </div>
+      <!-- 审批流水 -->
+      <div class="approval-history" v-if="approvalHistory.length" style="margin-top:14px;">
+        <div class="muted" style="margin-bottom:6px; font-weight:600;">审批流水记录</div>
+        <div class="approval-event" v-for="(ev, idx) in approvalHistory" :key="`apv-${idx}-${ev.at}`">
+          <el-tag size="small" :type="eventTagType(ev.action)">{{ eventText(ev.action) }}</el-tag>
+          <span>{{ formatDateTime(ev.at) }}</span>
+          <span>操作人: {{ ev.operator || '-' }}</span>
+          <span v-if="ev.scopes?.length">范围: {{ ev.scopes.map(scopeLabel).join(' / ') }}</span>
+          <span v-if="ev.note">备注: {{ ev.note }}</span>
+        </div>
+      </div>
+    </el-card>
+
+    <!-- ═══════════ 实际资源访问面板 ═══════════ -->
     <el-card v-if="result && result.granted" class="panel resources-card" shadow="never">
       <template #header>
         <div class="hdr-row">
-          <span class="hdr">🎯 访问目标域资源 <small>(凭 Session 在 {{ session?.remaining_sec || 0 }}s 内有效)</small></span>
+          <span class="hdr">🎯 目标域资源实操 <small>Session 剩余 {{ session?.remaining_sec || 0 }}s · 不同权限可操作不同资源</small></span>
           <div style="display:flex; gap:8px;">
             <el-button size="small" @click="refreshLiveData" :loading="liveRefreshing">刷新实时数据</el-button>
             <el-button size="small" @click="loadRecords">刷新记录</el-button>
           </div>
         </div>
       </template>
-      <div v-if="permissions" class="perm-panel">
-        <div class="perm-hd">
-          <el-tag :type="permissions.valid ? 'success' : 'danger'" effect="dark">
-            {{ permissions.valid ? '权限有效' : '权限无效' }}
-          </el-tag>
-          <span class="muted">
-            资源授权 {{ Object.keys(permissions.resource_actions || {}).length }} 项 · Scope {{ permissions.scope_list?.length || 0 }} 项
-          </span>
-          <span class="muted">
-            申请: {{ (permissions.requested_scopes || []).map(scopeLabel).join(' / ') || '无' }}
-            · 实际授予: {{ (permissions.granted_scopes || []).map(scopeLabel).join(' / ') || '无' }}
-          </span>
-        </div>
-        <div class="perm-hd" v-if="approval">
-          <el-tag :type="approvalTagType(approval.status)">
-            审批状态: {{ approvalText(approval.status) }}
-          </el-tag>
-          <span class="muted" v-if="approval.pending_scopes?.length">
-            待审批: {{ approval.pending_scopes.map(scopeLabel).join(' / ') }}
-          </span>
-          <span class="muted" v-if="approval.note">备注: {{ approval.note }}</span>
-          <span class="muted" v-if="approval.approver">审批人: {{ approval.approver }}</span>
-          <span class="muted" v-if="approval.updated_at">审批时间: {{ formatDateTime(approval.updated_at) }}</span>
-          <el-button v-if="approval.status==='pending'" size="small" type="success" @click="approveCurrentSession">批准高权限</el-button>
-          <el-button v-if="approval.status==='pending'" size="small" type="danger" @click="rejectCurrentSession">驳回高权限</el-button>
-        </div>
-        <div class="perm-scopes">
-          <el-tag v-for="s in (permissions.scope_list || [])" :key="s" size="small" type="info">{{ s }}</el-tag>
-          <span v-if="!(permissions.scope_list || []).length" class="muted">当前会话未授予任何可用 scope</span>
-        </div>
-        <div class="approval-history" v-if="approvalHistory.length">
-          <div class="muted" style="margin:8px 0 6px;">审批流水</div>
-          <div class="approval-event" v-for="(ev, idx) in approvalHistory" :key="`apv-${idx}-${ev.at}`">
-            <el-tag size="small" :type="eventTagType(ev.action)">{{ eventText(ev.action) }}</el-tag>
-            <span>{{ formatDateTime(ev.at) }}</span>
-            <span>操作人: {{ ev.operator || '-' }}</span>
-            <span v-if="ev.scopes?.length">范围: {{ ev.scopes.map(scopeLabel).join(' / ') }}</span>
-            <span v-if="ev.note">备注: {{ ev.note }}</span>
-          </div>
-        </div>
-      </div>
 
-      <div v-for="m in moduleGroups" :key="`mod-${m.key}`" class="module-block">
-        <div class="module-hd">
-          <span class="module-title">{{ m.title }}</span>
-          <span class="muted">{{ m.desc }}</span>
+      <!-- ——— 安全区 LEVEL 1: 只读 (绿色) ——— -->
+      <div class="security-zone zone-readonly">
+        <div class="sz-header">
+          <div class="sz-badge" style="background:#67C23A;">L1</div>
+          <div class="sz-title">安全区 · 只读访问</div>
+          <div class="sz-tag-row">
+            <el-tag type="success" size="small" effect="dark">readonly</el-tag>
+            <span class="sz-desc">读取目标域传感器遥测数据和域态势统计 — 基础权限，认证通过即授予</span>
+          </div>
+          <el-tag v-if="hasScopeGranted('readonly')" type="success" size="small" style="margin-left:auto;">权限已生效</el-tag>
+          <el-tag v-else type="danger" size="small" style="margin-left:auto;">无此权限</el-tag>
         </div>
-        <el-row :gutter="14" v-if="m.list.length">
-          <el-col :span="8" v-for="r in m.list" :key="r.id" style="margin-bottom:14px">
-            <div class="res-card" :class="'t-'+r.resource_type">
-              <div class="res-top">
-                <div class="res-icon">{{ resIcon(r.resource_type) }}</div>
-                <el-tag size="small" :type="resTagType(r.resource_type)">{{ resTypeLabel(r.resource_type) }}</el-tag>
+        <el-row :gutter="14" v-if="readonlyResources.length">
+          <el-col :span="12" v-for="r in readonlyResources" :key="r.id" style="margin-bottom:14px;">
+            <div class="biz-card" :class="{ locked: !hasScopeGranted('readonly') }">
+              <div class="biz-card-head">
+                <span class="biz-icon">{{ r.resource_type === 'sensor_data' ? '🌡️' : '📊' }}</span>
+                <span class="biz-title">{{ displayResName(r) }}</span>
+                <el-tag size="small" :type="r.resource_type === 'sensor_data' ? 'success' : 'info'">{{ resTypeLabel(r.resource_type) }}</el-tag>
               </div>
-              <div class="res-name">{{ showText(r.name || (`资源 #${r.id}`)) }}</div>
-              <div class="res-name">{{ displayResName(r) }}</div>
-              <div class="res-desc">{{ displayResDesc(r) }}</div>
-              <div class="res-extra" v-if="r.resource_type === 'sensor_data'">
-                <el-tag size="small" :type="r._metaOnline ? 'success' : 'info'">在线: {{ r._metaOnline ? 'YES' : 'NO' }}</el-tag>
-                <el-tag size="small">信号: {{ r._metaSignal ?? '--' }} dBm</el-tag>
-                <el-tag size="small">位置: {{ r._metaGeo || '--' }}</el-tag>
-              </div>
-              <div class="res-extra" v-if="r.resource_type === 'query'">
-                <el-tag size="small">活跃设备: {{ r._metaActive ?? '--' }}</el-tag>
-                <el-tag size="small">在线设备: {{ r._metaOnlineCount ?? '--' }}</el-tag>
-                <el-tag size="small">平均信号: {{ r._metaAvgSignal ?? '--' }}</el-tag>
-              </div>
-              <div class="res-extra" v-if="r.resource_type === 'control'">
-                <el-select v-model="r._ctrlCommand" size="small" style="width:100%; margin-bottom:6px">
-                  <el-option label="重启设备" value="reboot" />
-                  <el-option label="刷新配置" value="reload_config" />
-                  <el-option label="切换节能模式" value="eco_mode" />
-                </el-select>
-                <el-input-number v-model="r._ctrlPriority" :min="1" :max="5" size="small" style="width:100%" />
-              </div>
-              <div class="res-extra" v-if="r.resource_type === 'storage'">
-                <el-input v-model="r._storeKey" size="small" placeholder="存储键，例如 profile.tempThreshold" style="margin-bottom:6px" />
-                <el-input v-model="r._storeValue" size="small" placeholder="写入值（WRITE时生效）" />
-              </div>
-              <div class="res-live" v-if="r.resource_type !== 'control'">
-                <div class="res-live-hd">
-                  <span>实时预览</span>
-                  <span class="res-live-time">{{ r._liveAt ? formatTime(r._liveAt) : '--' }}</span>
+              <div class="biz-desc">{{ displayResDesc(r) }}</div>
+              <!-- 传感器仪表盘 -->
+              <div v-if="r.resource_type === 'sensor_data'" class="sensor-dashboard">
+                <div class="sensor-metric">
+                  <div class="sm-label">在线状态</div>
+                  <div class="sm-value" :class="r._metaOnline ? 'online' : 'offline'">
+                    <span class="sm-dot"></span>{{ r._metaOnline ? '在线' : '离线' }}
+                  </div>
                 </div>
-                <pre class="res-live-body">{{ r._liveText || '等待拉取实时数据…' }}</pre>
+                <div class="sensor-metric">
+                  <div class="sm-label">信号强度</div>
+                  <div class="sm-value">
+                    <div class="signal-bar-bg">
+                      <div class="signal-bar-fill" :style="{ width: signalPercent(r._metaSignal) + '%', background: signalColor(r._metaSignal) }"></div>
+                    </div>
+                    <span class="sm-num">{{ r._metaSignal ?? '--' }} dBm</span>
+                  </div>
+                </div>
+                <div class="sensor-metric">
+                  <div class="sm-label">地理位置</div>
+                  <div class="sm-value"><code>{{ r._metaGeo || '--' }}</code></div>
+                </div>
               </div>
-              <div class="perm-actions">
-                <el-tag v-for="a in (permissions?.resource_actions?.[r.id] || [])" :key="`${r.id}-${a}`" size="small">
-                  {{ a.toUpperCase() }}
-                </el-tag>
-                <el-tag v-if="!(permissions?.resource_actions?.[r.id] || []).length" type="danger" size="small">无权限</el-tag>
+              <!-- 域态势看板 -->
+              <div v-if="r.resource_type === 'query'" class="query-dashboard">
+                <div class="qd-stat">
+                  <div class="qd-num">{{ r._metaActive ?? '--' }}</div>
+                  <div class="qd-label">活跃设备</div>
+                </div>
+                <div class="qd-stat">
+                  <div class="qd-num" style="color:#67C23A">{{ r._metaOnlineCount ?? '--' }}</div>
+                  <div class="qd-label">当前在线</div>
+                </div>
+                <div class="qd-stat">
+                  <div class="qd-num" style="color:#409EFF">{{ r._metaAvgSignal ?? '--' }}</div>
+                  <div class="qd-label">平均信号(dBm)</div>
+                </div>
               </div>
-              <el-select v-if="(permissions?.resource_actions?.[r.id] || []).length > 1" v-model="r._selectedAction"
-                size="small" style="width:100%; margin-bottom:8px">
-                <el-option v-for="a in permissions.resource_actions[r.id]" :key="`${r.id}-pick-${a}`" :label="a.toUpperCase()" :value="a"/>
-              </el-select>
-              <el-button type="primary" size="small" :loading="r._loading" @click="access(r)" style="width:100%"
-                :disabled="!resourceAction(r)">
-                <el-icon><Promotion/></el-icon>&nbsp;{{ actionLabel(resourceAction(r)) }}
-              </el-button>
+              <!-- 实时数据预览 -->
+              <div class="biz-live" v-if="hasScopeGranted('readonly')">
+                <div class="biz-live-hd">
+                  <span>📡 实时数据流</span>
+                  <span class="biz-live-time">{{ r._liveAt ? formatTime(r._liveAt) : '等待拉取…' }}</span>
+                </div>
+                <pre class="biz-live-body">{{ r._liveText || '点击下方按钮获取实时数据' }}</pre>
+              </div>
+              <div v-else class="biz-locked-overlay">🔒 需要 readonly 权限才能读取实时数据</div>
+              <!-- 操作按钮 -->
+              <div class="biz-actions">
+                <div class="perm-actions">
+                  <el-tag v-for="a in (permissions?.resource_actions?.[r.id] || [])" :key="`${r.id}-${a}`" size="small">{{ a.toUpperCase() }}</el-tag>
+                  <el-tag v-if="!(permissions?.resource_actions?.[r.id] || []).length" type="danger" size="small">无权限</el-tag>
+                </div>
+                <el-button type="success" size="small" :loading="r._loading" @click="access(r)" style="width:100%"
+                  :disabled="!resourceAction(r)">
+                  📖 读取数据 (READ)
+                </el-button>
+              </div>
             </div>
           </el-col>
         </el-row>
-        <el-empty v-else :description="`${m.title}暂无动态资源`" :image-size="64"/>
+        <el-empty v-else description="该目标域暂无只读资源" :image-size="48"/>
       </div>
 
-      <!-- 调用结果 & 历史 -->
-      <el-divider content-position="left">调用历史 (本会话)</el-divider>
+      <!-- ——— 安全区 LEVEL 2: 控制 (橙色) ——— -->
+      <div class="security-zone zone-control">
+        <div class="sz-header">
+          <div class="sz-badge" style="background:#E6A23C;">L2</div>
+          <div class="sz-title">高权限区 · 设备控制</div>
+          <div class="sz-tag-row">
+            <el-tag type="warning" size="small" effect="dark">control</el-tag>
+            <span class="sz-desc">向目标域设备下发远程控制命令 — 需申请 + 目标域管理员审批</span>
+          </div>
+          <el-tag v-if="hasScopeGranted('control')" type="success" size="small" style="margin-left:auto;">权限已生效</el-tag>
+          <el-tag v-else-if="hasScopeRequested('control')" type="warning" size="small" style="margin-left:auto;">{{ approval?.status === 'pending' ? '待审批' : '未授予' }}</el-tag>
+          <el-tag v-else type="info" size="small" style="margin-left:auto;">未申请</el-tag>
+        </div>
+        <el-row :gutter="14" v-if="controlResources.length">
+          <el-col :span="12" v-for="r in controlResources" :key="r.id" style="margin-bottom:14px;">
+            <div class="biz-card ctrl-card" :class="{ locked: !hasScopeGranted('control') }">
+              <div class="biz-card-head">
+                <span class="biz-icon">🎛️</span>
+                <span class="biz-title">{{ displayResName(r) }}</span>
+                <el-tag size="small" type="warning">远程控制</el-tag>
+              </div>
+              <div class="biz-desc">{{ displayResDesc(r) }}</div>
+              <div v-if="hasScopeGranted('control')" class="ctrl-panel">
+                <div class="ctrl-row">
+                  <label class="ctrl-label">控制命令</label>
+                  <el-select v-model="r._ctrlCommand" size="small" style="flex:1">
+                    <el-option label="🔄 重启设备 (reboot)" value="reboot" />
+                    <el-option label="⚙️ 刷新配置 (reload_config)" value="reload_config" />
+                    <el-option label="🌱 切换节能模式 (eco_mode)" value="eco_mode" />
+                  </el-select>
+                </div>
+                <div class="ctrl-row">
+                  <label class="ctrl-label">执行优先级</label>
+                  <el-slider v-model="r._ctrlPriority" :min="1" :max="5" :step="1" show-stops
+                    :marks="{ 1:'低', 3:'中', 5:'高' }" style="flex:1; padding: 0 10px;" />
+                </div>
+                <div class="ctrl-warning">
+                  ⚠️ 控制命令将直接作用于目标域设备，请确认操作。风险策略要求: 设备在线 + 数据新鲜 + 风险评分 ≤ 80
+                </div>
+              </div>
+              <div v-else class="biz-locked-overlay">
+                🔒 需要 control 权限 + 管理员审批才能控制目标域设备
+                <div v-if="hasScopeRequested('control') && approval?.status === 'pending'" style="margin-top:8px;">
+                  <el-button size="small" type="success" @click="approveCurrentSession">模拟: 管理员批准</el-button>
+                  <el-button size="small" type="danger" @click="rejectCurrentSession">模拟: 管理员驳回</el-button>
+                </div>
+              </div>
+              <div class="biz-actions">
+                <div class="perm-actions">
+                  <el-tag v-for="a in (permissions?.resource_actions?.[r.id] || [])" :key="`${r.id}-${a}`" size="small">{{ a.toUpperCase() }}</el-tag>
+                  <el-tag v-if="!(permissions?.resource_actions?.[r.id] || []).length" type="danger" size="small">无权限</el-tag>
+                </div>
+                <el-button type="warning" size="small" :loading="r._loading" @click="access(r)" style="width:100%"
+                  :disabled="!resourceAction(r)">
+                  ⚡ 执行控制命令 (EXEC)
+                </el-button>
+              </div>
+            </div>
+          </el-col>
+        </el-row>
+        <el-empty v-else description="该目标域暂无控制资源" :image-size="48"/>
+      </div>
+
+      <!-- ——— 安全区 LEVEL 3: 存储 (紫色) ——— -->
+      <div class="security-zone zone-storage">
+        <div class="sz-header">
+          <div class="sz-badge" style="background:#722ed1;">L3</div>
+          <div class="sz-title">高权限区 · 数据存储</div>
+          <div class="sz-tag-row">
+            <el-tag size="small" effect="dark" style="background:#722ed1; border-color:#722ed1;">storage</el-tag>
+            <span class="sz-desc">对目标域存储池进行键值读写 — 需申请 + 目标域管理员审批</span>
+          </div>
+          <el-tag v-if="hasScopeGranted('storage')" type="success" size="small" style="margin-left:auto;">权限已生效</el-tag>
+          <el-tag v-else-if="hasScopeRequested('storage')" type="warning" size="small" style="margin-left:auto;">{{ approval?.status === 'pending' ? '待审批' : '未授予' }}</el-tag>
+          <el-tag v-else type="info" size="small" style="margin-left:auto;">未申请</el-tag>
+        </div>
+        <el-row :gutter="14" v-if="storageResources.length">
+          <el-col :span="12" v-for="r in storageResources" :key="r.id" style="margin-bottom:14px;">
+            <div class="biz-card store-card" :class="{ locked: !hasScopeGranted('storage') }">
+              <div class="biz-card-head">
+                <span class="biz-icon">💾</span>
+                <span class="biz-title">{{ displayResName(r) }}</span>
+                <el-tag size="small" style="background:#f3e8ff; color:#722ed1; border-color:#d3adf7;">键值存储</el-tag>
+              </div>
+              <div class="biz-desc">{{ displayResDesc(r) }}</div>
+              <div v-if="hasScopeGranted('storage')" class="store-panel">
+                <div class="store-row">
+                  <el-input v-model="r._storeKey" size="small" placeholder="键名 (如 config.tempThreshold)">
+                    <template #prepend>Key</template>
+                  </el-input>
+                </div>
+                <div class="store-row">
+                  <el-input v-model="r._storeValue" size="small" placeholder="写入值 (WRITE 时必填)">
+                    <template #prepend>Value</template>
+                  </el-input>
+                </div>
+                <div class="store-actions-row">
+                  <el-select v-if="(permissions?.resource_actions?.[r.id] || []).length > 1" v-model="r._selectedAction"
+                    size="small" style="width:140px;">
+                    <el-option v-for="a in permissions.resource_actions[r.id]" :key="`${r.id}-pick-${a}`" :label="a.toUpperCase()" :value="a"/>
+                  </el-select>
+                  <el-button type="primary" size="small" :loading="r._loading" @click="access(r)"
+                    :disabled="!resourceAction(r)" style="flex:1;">
+                    {{ actionLabel(resourceAction(r)) }}
+                  </el-button>
+                </div>
+              </div>
+              <div v-else class="biz-locked-overlay">
+                🔒 需要 storage 权限 + 管理员审批才能访问目标域存储
+                <div v-if="hasScopeRequested('storage') && approval?.status === 'pending'" style="margin-top:8px;">
+                  <el-button size="small" type="success" @click="approveCurrentSession">模拟: 管理员批准</el-button>
+                  <el-button size="small" type="danger" @click="rejectCurrentSession">模拟: 管理员驳回</el-button>
+                </div>
+              </div>
+              <!-- 实时预览(有权限时) -->
+              <div class="biz-live" v-if="hasScopeGranted('storage')">
+                <div class="biz-live-hd">
+                  <span>📡 存储池快照</span>
+                  <span class="biz-live-time">{{ r._liveAt ? formatTime(r._liveAt) : '等待拉取…' }}</span>
+                </div>
+                <pre class="biz-live-body">{{ r._liveText || '点击读取按钮获取存储数据' }}</pre>
+              </div>
+              <div class="biz-actions" v-if="!hasScopeGranted('storage')">
+                <div class="perm-actions">
+                  <el-tag type="danger" size="small">无权限</el-tag>
+                </div>
+              </div>
+            </div>
+          </el-col>
+        </el-row>
+        <el-empty v-else description="该目标域暂无存储资源" :image-size="48"/>
+      </div>
+
+      <!-- 调用历史 -->
+      <el-divider content-position="left">📋 跨域资源调用记录 (本会话)</el-divider>
       <div class="rec-list">
         <div v-for="rec in records" :key="rec.id" class="rec" :class="rec.status">
           <div class="rec-hd">
             <el-tag size="small" :type="recTagType(rec.status)" effect="dark">{{ recLabel(rec.status) }}</el-tag>
             <span class="rec-name">{{ showText(rec.resource_name || ('资源 #'+rec.resource_id)) }}</span>
+            <el-tag size="small" type="info">{{ (rec.action || '').toUpperCase() }}</el-tag>
             <span class="rec-time">{{ formatTime(rec.created_at) }} · {{ rec.latency_ms }}ms</span>
           </div>
           <pre class="rec-body">{{ prettyJson(rec.response) }}</pre>
         </div>
-        <div v-if="!records.length" class="muted" style="text-align:center; padding:20px">点击上方资源卡片发起调用</div>
-      </div>
-      <el-divider content-position="left">控制命令执行结果</el-divider>
-      <div class="spec-list">
-        <div v-for="c in controlExecList" :key="`ctrl-${c.id}`" class="spec-item">
-          <el-tag size="small" type="warning">EXEC</el-tag>
-          <span>{{ formatDateTime(c.created_at) }}</span>
-          <span>{{ c.resource_name || (`资源#${c.resource_id}`) }}</span>
-          <span>命令: {{ c.command || '-' }}</span>
-          <span>优先级: {{ c.priority ?? '-' }}</span>
-          <span>结果: {{ c.ok ? '成功' : '失败' }}</span>
+        <div v-if="!records.length" class="muted" style="text-align:center; padding:20px">
+          点击上方资源卡片中的操作按钮发起跨域调用。<br/>
+          <span style="font-size:11px;">只读资源可直接调用，控制/存储资源需对应权限和审批。</span>
         </div>
-        <div v-if="!controlExecList.length" class="muted" style="text-align:center; padding:12px">暂无控制命令记录</div>
       </div>
-      <el-divider content-position="left">存储写入历史</el-divider>
-      <div class="spec-list">
-        <div v-for="s in storageWriteList" :key="`store-${s.id}`" class="spec-item">
-          <el-tag size="small" type="success">WRITE</el-tag>
-          <span>{{ formatDateTime(s.created_at) }}</span>
-          <span>{{ s.resource_name || (`资源#${s.resource_id}`) }}</span>
-          <span>Key: {{ s.key || '-' }}</span>
-          <span>Value: {{ s.value || '-' }}</span>
-          <span>结果: {{ s.ok ? '成功' : '失败' }}</span>
+
+      <!-- 控制命令记录 -->
+      <div v-if="controlExecList.length">
+        <el-divider content-position="left">⚡ 控制命令执行记录</el-divider>
+        <div class="spec-list">
+          <div v-for="c in controlExecList" :key="`ctrl-${c.id}`" class="spec-item">
+            <el-tag size="small" type="warning" effect="dark">EXEC</el-tag>
+            <span>{{ formatDateTime(c.created_at) }}</span>
+            <span class="spec-cmd">{{ c.command || '-' }}</span>
+            <span>优先级: <b>{{ c.priority ?? '-' }}</b></span>
+            <el-tag :type="c.ok ? 'success' : 'danger'" size="small">{{ c.ok ? '成功' : '失败' }}</el-tag>
+          </div>
         </div>
-        <div v-if="!storageWriteList.length" class="muted" style="text-align:center; padding:12px">暂无存储写入记录</div>
+      </div>
+
+      <!-- 存储写入记录 -->
+      <div v-if="storageWriteList.length">
+        <el-divider content-position="left">💾 存储写入记录</el-divider>
+        <div class="spec-list">
+          <div v-for="s in storageWriteList" :key="`store-${s.id}`" class="spec-item">
+            <el-tag size="small" effect="dark" style="background:#722ed1; border-color:#722ed1;">WRITE</el-tag>
+            <span>{{ formatDateTime(s.created_at) }}</span>
+            <code class="spec-kv">{{ s.key }}</code>
+            <span>=</span>
+            <code class="spec-kv">{{ s.value }}</code>
+            <el-tag :type="s.ok ? 'success' : 'danger'" size="small">{{ s.ok ? '成功' : '失败' }}</el-tag>
+          </div>
+        </div>
       </div>
 
       <el-divider content-position="left">🕒 跨域活动时间线</el-divider>
@@ -839,6 +1016,60 @@ const moduleGroups = computed(() => {
     { key: 'storage', title: '存储模块', desc: '存储读写资源（READ / WRITE）', list: storage }
   ]
 })
+
+// 分类资源
+const readonlyResources = computed(() => resources.value.filter(r => r.resource_type === 'sensor_data' || r.resource_type === 'query'))
+const controlResources = computed(() => resources.value.filter(r => r.resource_type === 'control'))
+const storageResources = computed(() => resources.value.filter(r => r.resource_type === 'storage'))
+
+// 权限矩阵配置
+const permTiers = [
+  {
+    scope: 'readonly', label: '只读', icon: '📖', color: '#67C23A',
+    desc: '基础安全权限，跨域认证通过即自动授予。可读取传感器遥测数据和域态势统计。',
+    abilities: [
+      { key: 'sensor_read', name: '读取设备传感器数据', desc: '在线状态、信号强度、地理位置、上报时间' },
+      { key: 'query_read', name: '查询域态势统计', desc: '活跃设备数、在线率、平均信号强度' },
+      { key: 'storage_peek', name: '查看存储键列表', desc: '仅限 key 列表，不含 value 内容' },
+    ]
+  },
+  {
+    scope: 'control', label: '控制', icon: '🎛️', color: '#E6A23C',
+    desc: '高权限。向目标域设备下发远程控制命令(重启、刷新配置、切换模式)。需申请且经目标域管理员审批。',
+    abilities: [
+      { key: 'exec_reboot', name: '远程重启目标域设备', desc: '向设备发送 reboot 指令并等待确认' },
+      { key: 'exec_reload', name: '刷新设备运行配置', desc: '下发 reload_config 指令实现热更新' },
+      { key: 'exec_eco', name: '切换设备节能模式', desc: '在正常/节能模式间切换，影响采集频率' },
+    ]
+  },
+  {
+    scope: 'storage', label: '存储', icon: '💾', color: '#722ed1',
+    desc: '高权限。对目标域存储池进行键值读取和写入。可修改设备配置阈值、策略参数等。需申请且经目标域管理员审批。',
+    abilities: [
+      { key: 'store_read', name: '读取存储键值', desc: '获取指定 key 的当前值和最近更新记录' },
+      { key: 'store_write', name: '写入/更新存储数据', desc: '新建或覆盖 key-value 对，可用于远程配置下发' },
+      { key: 'store_list', name: '列出存储池所有条目', desc: '查看当前域存储池所有 key 及更新时间' },
+    ]
+  }
+]
+
+function hasScopeGranted(scope) {
+  return (permissions.value?.granted_scopes || []).includes(scope)
+}
+function hasScopeRequested(scope) {
+  return (permissions.value?.requested_scopes || []).includes(scope)
+}
+function signalPercent(dbm) {
+  if (dbm == null) return 0
+  // -120 dBm = 0%, -40 dBm = 100%
+  return Math.max(0, Math.min(100, (dbm + 120) / 80 * 100))
+}
+function signalColor(dbm) {
+  if (dbm == null) return '#dcdfe6'
+  if (dbm >= -60) return '#67C23A'
+  if (dbm >= -80) return '#E6A23C'
+  return '#F56C6C'
+}
 
 /* ───── 辅助函数 ───── */
 function checkState(n) {
@@ -1409,4 +1640,104 @@ watch(() => form.src_did, onSrcChange)
 .tl-detail { font-size:12px; color:#606266; margin-top:4px; display:flex; gap:10px; flex-wrap:wrap; }
 .tl-note { color:#606266; font-size:12px; }
 .tl-extra { margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px; }
+
+/* ═══ 权限矩阵 ═══ */
+.perm-matrix { display:flex; flex-direction:column; gap:14px; }
+.pm-tier { border:1px solid #ebeef5; border-radius:10px; overflow:hidden; transition:all .3s; }
+.pm-tier.unlocked { border-color:#c2e7b0; }
+.pm-tier.locked { opacity:.88; }
+.pm-tier-head { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid #f0f2f5; border-left:4px solid #dcdfe6; background:#fafafa; flex-wrap:wrap; }
+.pm-tier.unlocked .pm-tier-head { background:#f6ffed; }
+.pm-tier-icon { font-size:28px; }
+.pm-tier-info { flex:1; min-width:200px; }
+.pm-tier-name { font-size:15px; font-weight:700; }
+.pm-tier-desc { font-size:12px; color:#909399; margin-top:2px; line-height:1.5; }
+.pm-tier-abilities { display:grid; grid-template-columns: repeat(3, 1fr); gap:0; }
+.pm-ability { display:flex; gap:10px; align-items:flex-start; padding:12px 16px; border-right:1px solid #f0f2f5; border-bottom:1px solid #f0f2f5; transition:all .2s; }
+.pm-ability:nth-child(3n) { border-right:none; }
+.pm-ability:nth-last-child(-n+3) { border-bottom:none; }
+.pm-ability.active { background:#fcfff5; }
+.pm-ability.disabled { background:#fafafa; }
+.pm-ability.disabled .pm-ab-name { color:#c0c4cc; }
+.pm-ability.disabled .pm-ab-desc { color:#dcdfe6; }
+.pm-ab-icon { font-size:16px; flex-shrink:0; margin-top:1px; }
+.pm-ab-name { font-size:13px; font-weight:600; color:#303133; }
+.pm-ab-desc { font-size:11px; color:#909399; margin-top:2px; line-height:1.4; }
+.pm-tier-hint { padding:10px 16px; font-size:12px; color:#909399; background:#fafafa; border-top:1px dashed #ebeef5; }
+.pm-tier-hint.warn { background:#fdf6ec; color:#7c5b00; }
+
+/* ═══ 安全区 ═══ */
+.security-zone { border:1px solid #ebeef5; border-radius:12px; margin-bottom:18px; overflow:hidden; }
+.zone-readonly { border-color:#c2e7b0; }
+.zone-control { border-color:#faecd8; }
+.zone-storage { border-color:#d3adf7; }
+.sz-header { display:flex; align-items:center; gap:10px; padding:12px 16px; flex-wrap:wrap; }
+.zone-readonly .sz-header { background:linear-gradient(135deg, #f6ffed, #fcffe6); }
+.zone-control .sz-header { background:linear-gradient(135deg, #fff7e6, #fffbe6); }
+.zone-storage .sz-header { background:linear-gradient(135deg, #f9f0ff, #f0e5ff); }
+.sz-badge { color:#fff; font-size:11px; font-weight:800; padding:4px 8px; border-radius:6px; line-height:1; }
+.sz-title { font-size:14px; font-weight:700; color:#303133; }
+.sz-tag-row { display:flex; align-items:center; gap:6px; }
+.sz-desc { font-size:11px; color:#909399; }
+
+/* ═══ 业务卡片 ═══ */
+.biz-card { background:#fff; border:1px solid #ebeef5; border-radius:10px; padding:16px; display:flex; flex-direction:column; transition:all .2s; position:relative; }
+.biz-card:hover { box-shadow:0 4px 16px rgba(0,0,0,.07); transform:translateY(-1px); }
+.biz-card.locked { opacity:.7; }
+.biz-card.locked::after { content:''; position:absolute; inset:0; background:repeating-linear-gradient(135deg, transparent, transparent 10px, rgba(0,0,0,.015) 10px, rgba(0,0,0,.015) 20px); border-radius:10px; pointer-events:none; }
+.biz-card-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.biz-icon { font-size:24px; }
+.biz-title { font-size:14px; font-weight:600; color:#303133; flex:1; }
+.biz-desc { font-size:12px; color:#909399; line-height:1.5; margin-bottom:12px; }
+
+/* 传感器仪表盘 */
+.sensor-dashboard { display:flex; flex-direction:column; gap:10px; padding:10px 12px; background:#f8fdf4; border:1px solid #e8f5e1; border-radius:8px; margin-bottom:12px; }
+.sensor-metric { display:flex; align-items:center; gap:10px; }
+.sm-label { font-size:12px; color:#606266; min-width:60px; font-weight:600; }
+.sm-value { display:flex; align-items:center; gap:8px; flex:1; font-size:13px; }
+.sm-value.online { color:#67C23A; font-weight:600; }
+.sm-value.offline { color:#F56C6C; font-weight:600; }
+.sm-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.sm-value.online .sm-dot { background:#67C23A; box-shadow:0 0 6px rgba(103,194,58,.5); animation:blink 2s infinite; }
+.sm-value.offline .sm-dot { background:#F56C6C; }
+.signal-bar-bg { width:100px; height:8px; background:#ebeef5; border-radius:4px; overflow:hidden; }
+.signal-bar-fill { height:100%; border-radius:4px; transition:width .5s; }
+.sm-num { font-size:12px; font-weight:600; color:#303133; }
+.sm-value code { font-size:11px; background:#eef; padding:1px 6px; border-radius:3px; }
+
+/* 域态势看板 */
+.query-dashboard { display:flex; gap:16px; padding:12px; background:#f0f9ff; border:1px solid #d6e4ff; border-radius:8px; margin-bottom:12px; justify-content:space-around; }
+.qd-stat { text-align:center; }
+.qd-num { font-size:24px; font-weight:800; color:#303133; line-height:1.2; }
+.qd-label { font-size:11px; color:#909399; margin-top:4px; }
+
+/* 控制面板 */
+.ctrl-panel { padding:12px; background:#fff8f0; border:1px solid #faecd8; border-radius:8px; margin-bottom:12px; }
+.ctrl-row { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.ctrl-row:last-child { margin-bottom:0; }
+.ctrl-label { font-size:12px; font-weight:600; color:#303133; min-width:70px; }
+.ctrl-warning { font-size:11px; color:#E6A23C; background:#fff8e1; border-left:3px solid #E6A23C; padding:6px 10px; border-radius:4px; margin-top:8px; line-height:1.5; }
+
+/* 存储面板 */
+.store-panel { padding:12px; background:#faf5ff; border:1px solid #e8d5f5; border-radius:8px; margin-bottom:12px; }
+.store-row { margin-bottom:8px; }
+.store-row:last-child { margin-bottom:0; }
+.store-actions-row { display:flex; gap:8px; margin-top:8px; }
+
+/* 通用锁定 */
+.biz-locked-overlay { background:#f5f5f5; border:1px dashed #d9d9d9; border-radius:8px; padding:20px; text-align:center; font-size:13px; color:#909399; margin-bottom:12px; }
+
+/* 实时数据 */
+.biz-live { background:#f8fbff; border:1px solid #e6effa; border-radius:6px; padding:8px 10px; margin-bottom:12px; }
+.biz-live-hd { display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#409EFF; margin-bottom:6px; }
+.biz-live-time { color:#909399; }
+.biz-live-body { margin:0; font-size:11px; color:#606266; max-height:80px; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+
+/* 操作区 */
+.biz-actions { margin-top:auto; }
+.biz-actions .perm-actions { margin-bottom:8px; }
+
+/* 记录列表 */
+.spec-cmd { font-family:Menlo,monospace; font-weight:600; color:#303133; }
+.spec-kv { font-family:Menlo,monospace; font-size:12px; background:#f0f0f0; padding:1px 6px; border-radius:3px; }
 </style>
